@@ -1,3 +1,8 @@
+/*
+ *
+ * Copyright (c) 2025 Troot0Fobia. All Rights Reserved.
+ */
+
 #pragma once
 
 #ifndef API_DTOS_H
@@ -19,4 +24,5 @@ struct __Proxy {
     const char* protocol;
 };
 
-#endif // API_DTOS_H
+#endif  // API_DTOS_H
+

@@ -4,6 +4,8 @@
  * functions which used in main application.
  *
  * Implement all functions that included in PluginAPI structure.
+ *
+ * Copyright (c) 2025 Troot0Fobia. All Rights Reserved.
  */
 
 #pragma once
@@ -29,24 +31,36 @@
 extern "C" {
 #endif
 
-enum VerboseLogLevel { VERBOSE = 0, DEBUG };
-using LogCallback = void (*)(void* ctx, VerboseLogLevel level, const char* msg);
-using PrintProcessedCallback = void (*)(void* ctx, const __Addr* addr, const char* status);
+enum PluginLogLevel { VERBOSE = 0, DEBUG, ERROR };
+using LogCallback = void (*)(void* ctx, PluginLogLevel level, const char* msg);
+using PrintProcessedCallback = void (*)(void* ctx,
+                                        const __Addr* addr,
+                                        const char* status);
+
+using InitPlugin = int (PLUGIN_API_CALL *)();
+using ShutdownPlugin = void (PLUGIN_API_CALL *)();
+using CreateSession =
+    const void *const (PLUGIN_API_CALL *)(const __Proxy *proxy);
+using CloseSession = void (PLUGIN_API_CALL *) (const void *const session_p);
 using GetPluginVersion = const char* (PLUGIN_API_CALL *)() noexcept;
-using ValidateAddr = int (PLUGIN_API_CALL *)(const __Addr* addr,
+using ValidateAddr = int (PLUGIN_API_CALL *)(const void *const session_p,
+                                             const __Addr* addr,
                                              void* const ctx,
                                              LogCallback log);
-using SendRequest = int (PLUGIN_API_CALL *)(const __Addr* const addr,
-                                            const __Proxy* proxy,
-                                            __Creds creds,
-                                            void* const ctx,
-                                            LogCallback log,
-                                            PrintProcessedCallback print_processed);
+using CheckCreds = int (PLUGIN_API_CALL *)(const void *const session,
+                                           __Creds creds,
+                                           void* const ctx,
+                                           LogCallback log,
+                                           PrintProcessedCallback print_processed);
 
 struct PLUGIN_API_EXPORT PluginAPI {
-    GetPluginVersion  getVersion;
+    InitPlugin initPlugin;
+    CreateSession createSession;
+    GetPluginVersion getVersion;
     ValidateAddr validateAddr;
-    SendRequest sendRequest;
+    CheckCreds checkCreds;
+    CloseSession closeSession;
+    ShutdownPlugin shutdownPlugin;
 };
 
 PLUGIN_API_EXPORT struct PluginAPI* PLUGIN_API_CALL get_plugin_api();
@@ -55,4 +69,5 @@ PLUGIN_API_EXPORT struct PluginAPI* PLUGIN_API_CALL get_plugin_api();
 }
 #endif
 
-#endif // PLUGIN_API_H
+#endif  // PLUGIN_API_H
+
