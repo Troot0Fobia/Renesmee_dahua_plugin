@@ -12,14 +12,19 @@
 #include <curl/curl.h>
 #include <optional>
 #include <string_view>
-#include <sys/poll.h>
 #include <vector>
+#include <format>
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+#else
+    #include <sys/poll.h>
+#endif
+
 
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <string>
-#include <system_error>
 static void WriteResponse(const std::string &filepath,
                           const std::vector<uint8_t> &data) {
     std::error_code err_code;
@@ -38,6 +43,10 @@ static int PLUGIN_API_CALL initPlugin() {
     if (res != CURLE_OK) {
         return -1;
     }
+#ifdef _WIN32
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
 
     return 0;
 }
@@ -71,7 +80,7 @@ static int PLUGIN_API_CALL validateAddr(const void *const session_p,
         reinterpret_cast<Session *>(const_cast<void *>(session_p));
 
     session->addr = addr;
-    if (!establishConnection(session)) {
+    if (!establishConnection(session, log, ctx)) {
         log(ctx, PluginLogLevel::ERROR,
             std::format(
                 "{}:{} | Failed establish connection with proxy {} "
@@ -79,14 +88,14 @@ static int PLUGIN_API_CALL validateAddr(const void *const session_p,
                 addr->ip,
                 addr->port,
                 session->proxy->addr.ip).c_str());
-        return 0;
+        return -2;
     }
 
     auto request = createRequestBody(RequestType::pollRequest);
     WriteResponse(std::format("responses/{}_{}/poll_request.bin",
                               addr->ip, addr->port),
                   request);
-    if (!sendRequest(session, request)) {
+    if (!sendRequest(session, request, log, ctx)) {
         log(ctx, PluginLogLevel::ERROR,
             std::format("{}:{} | Failed send poll request",
                         addr->ip,
@@ -138,17 +147,20 @@ static int PLUGIN_API_CALL checkCreds(const void *const session_p,
     Session *const session =
         reinterpret_cast<Session *>(const_cast<void *>(session_p));
 
-    if (!establishConnection(session)) {
+    if (!establishConnection(session, log, ctx)) {
         log(ctx, PluginLogLevel::ERROR,
             std::format("{}:{} | Failed establish connection with proxy {} "
                         "while check creds",
                         session->addr->ip,
                         session->addr->port,
                         session->proxy->addr.ip).c_str());
-        return 0;
+        return -2;
     }
 
-    if (!sendRequest(session, createRequestBody(RequestType::pollRequest))) {
+    if (!sendRequest(session,
+                     createRequestBody(RequestType::pollRequest),
+                     log,
+                     ctx)) {
         log(ctx, PluginLogLevel::ERROR,
             std::format("{}:{} | Failed send poll request in check creds",
                         session->addr->ip,
@@ -213,7 +225,7 @@ static int PLUGIN_API_CALL checkCreds(const void *const session_p,
 
     requestBody.insert(requestBody.end(), payload.begin(), payload.end());
 
-    if (!sendRequest(session, requestBody)) {
+    if (!sendRequest(session, requestBody, log, ctx)) {
         log(ctx, PluginLogLevel::ERROR,
             std::format("{}:{} {}:{} | Failed send creds request",
                         session->addr->ip,
@@ -294,6 +306,9 @@ static void PLUGIN_API_CALL closeSession(const void *const session_p) {
 
 static void PLUGIN_API_CALL shutdownPlugin() {
     curl_global_cleanup();
+#ifdef _WIN32
+    WSACleanup();
+#endif
 }
 
 static PluginAPI api = {

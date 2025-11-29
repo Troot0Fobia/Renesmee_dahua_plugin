@@ -6,12 +6,18 @@
 #pragma once
 
 #include "api_DTOs.hpp"
+#include "plugin_api.hpp"
 #include <cstdint>
 #include <curl/curl.h>
 #include <optional>
 #include <string_view>
-#include <sys/poll.h>
 #include <vector>
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2topip.h>
+#else
+    #include <sys/poll.h>
+#endif
 
 
 const std::string_view REALM_TAG = "Realm:";
@@ -31,10 +37,12 @@ struct Session {
     struct pollfd poll_fds[1];
 };
 
-bool establishConnection(Session *const session);
+bool establishConnection(Session *const session, LogCallback log, void *ctx);
 std::vector<uint8_t> createRequestBody(uint8_t requestType);
 bool sendRequest(const Session *const session,
-                 const std::vector<uint8_t> &data);
+                 const std::vector<uint8_t> &data,
+                 LogCallback log,
+                 void *ctx);
 std::optional<std::vector<uint8_t>> receiveResponse(Session *const session);
 bool isValidResponse(const std::vector<uint8_t> &response, RequestType type);
 std::optional<std::pair<std::string_view, std::string_view>>
