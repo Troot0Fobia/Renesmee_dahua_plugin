@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 
@@ -69,10 +70,10 @@ std::string collapse_data(const std::vector<uint8_t> &data) {
     return result.str();
 }
 
-std::vector<uint8_t> createPasswordHash(std::string_view username,
-                                        std::string_view realm,
-                                        std::string_view random,
-                                        std::string_view password) {
+std::string createFirstStep(std::string_view username,
+                            std::string_view realm,
+                            std::string_view random,
+                            std::string_view password) {
     std::string first_step = std::format(format_str, username, realm, password);
 
     std::string first_step_hash =
@@ -92,23 +93,33 @@ std::vector<uint8_t> createPasswordHash(std::string_view username,
         second_hashed_step[i] = std::toupper(second_hashed_step[i]);
     }
 
+    return second_hashed_step;
+}
+
+std::vector<uint8_t> createPasswordHash(std::string_view username,
+                                        std::string_view realm,
+                                        std::string_view random,
+                                        std::string_view password) {
+    std::string first_hashed_step =
+        createFirstStep(username, realm, random, password);
+
     std::vector<uint8_t> password_hash = md5(to_byte_vector(password));
     std::string collapsed_pass = collapse_data(password_hash);
 
     std::string second_step_pass =
         std::format(format_str, username, random, collapsed_pass);
 
-    std::string second_step_hashed_pass =
+    std::string second_hashed_step =
         to_hex_string(md5(to_byte_vector(second_step_pass)));
 
-    for (size_t i = 0; i < second_step_hashed_pass.length(); ++i) {
-        second_step_hashed_pass[i] = std::toupper(second_step_hashed_pass[i]);
+    for (size_t i = 0; i < second_hashed_step.length(); ++i) {
+        second_hashed_step[i] = std::toupper(second_hashed_step[i]);
     }
 
-    return to_byte_vector(second_hashed_step + second_step_hashed_pass);
+    return to_byte_vector(first_hashed_step + second_hashed_step);
 }
 
-std::vector<uint8_t> createPayload(std::string_view realm,
+std::vector<uint8_t> createBinPayload(std::string_view realm,
                                    std::string_view random,
                                    std::string_view username,
                                    std::string_view password) {

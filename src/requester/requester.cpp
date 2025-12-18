@@ -5,14 +5,16 @@
 
 #include "requester.hpp"
 #include "api_DTOs.hpp"
+#include "binary_interface/binary_interface.hpp"
 #include "plugin_api.hpp"
-#include <cstring>
+#include "web_interface/web_interface.hpp"
+#include <cstdint>
 #include <curl/curl.h>
 #include <format>
 #include <optional>
 #include <string>
-#include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 
@@ -21,6 +23,7 @@ bool establishConnection(Session *const session, LogCallback log, void *ctx) {
         log(ctx,
             PluginLogLevel::ERROR,
             "Not session or proxy or curl handler or addr does not provided");
+
         if (!session) {
             log(ctx, PluginLogLevel::DEBUG, "Session does not provided");
         } else if (!session->proxy) {
@@ -30,24 +33,22 @@ bool establishConnection(Session *const session, LogCallback log, void *ctx) {
         } else if (!session->addr) {
             log(ctx, PluginLogLevel::DEBUG, "Addr does not provided");
         }
+
         return false;
     }
 
     int attempts = 5;
-    char errbuf[CURL_ERROR_SIZE];
-
+    std::string_view interface_type =
+        session->interface_type == INTERFACE_TYPE_WEB ? "web" : "bin";
     while (attempts--) {
         log(ctx,
             PluginLogLevel::DEBUG,
-            std::format("Attempt #{} to establish connection",
-                        5 - attempts).c_str());
+            std::format("Attempt #{} to establish {} connection",
+                        5 - attempts, interface_type).c_str());
 
-        memset(errbuf, 0, CURL_ERROR_SIZE);
         curl_easy_cleanup(session->curl);
         session->curl = curl_easy_init();
 
-        curl_easy_setopt(session->curl, CURLOPT_ERRORBUFFER, errbuf);
-        curl_easy_setopt(session->curl, CURLOPT_CONNECT_ONLY, 1L);
         curl_easy_setopt(session->curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5);
         curl_easy_setopt(session->curl, CURLOPT_PROXY, session->proxy->addr.ip);
         curl_easy_setopt(session->curl, CURLOPT_PROXYPORT,
@@ -59,44 +60,16 @@ bool establishConnection(Session *const session, LogCallback log, void *ctx) {
         curl_easy_setopt(session->curl, CURLOPT_CONNECTTIMEOUT, 10L);
         curl_easy_setopt(session->curl, CURLOPT_TIMEOUT, 30L);
         curl_easy_setopt(session->curl, CURLOPT_SERVER_RESPONSE_TIMEOUT, 25L);
-        curl_easy_setopt(session->curl, CURLOPT_URL,
-                         std::format("{}:{}",
-                                     session->addr->ip,
-                                     session->addr->port).c_str());
 
-        CURLcode res = curl_easy_perform(session->curl);
-        if (res != CURLE_OK) {
-            log(ctx,
-                PluginLogLevel::ERROR,
-                std::format("Error code {} and message from curl "
-                            "while trying establish "
-                            "connection with proxy: {}\n",
-                            static_cast<int>(res),
-                            strlen(errbuf) ? errbuf : curl_easy_strerror(res))
-                .c_str());
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
+        if (session->interface_type == INTERFACE_TYPE_BINARY) {
+            if (!binary_interface::configureCurl(session, log, ctx)) {
+                continue;
+            }
+        } else if (session->interface_type == INTERFACE_TYPE_WEB) {
+            web_interface::configureCurl(session);
+        } else {
+            return false;
         }
-
-        memset(errbuf, 0, CURL_ERROR_SIZE);
-        res = curl_easy_getinfo(session->curl,
-                                CURLINFO_ACTIVESOCKET,
-                                &session->socketfd);
-        if (res != CURLE_OK) {
-            log(ctx,
-                PluginLogLevel::ERROR,
-                std::format("Error code {} and message from curl "
-                            "while trying receive "
-                            "socket: {}\n",
-                            static_cast<int>(res),
-                            strlen(errbuf) ? errbuf : curl_easy_strerror(res))
-                .c_str());
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
-        }
-
-        session->poll_fds[0].fd = session->socketfd;
-        session->poll_fds[0].events = POLLIN;
 
         return true;
     }
@@ -104,185 +77,91 @@ bool establishConnection(Session *const session, LogCallback log, void *ctx) {
     return false;
 }
 
-std::vector<uint8_t> createRequestBody(uint8_t requestType) {
-    std::vector<uint8_t> requestBody(32, 0x00);
-    requestBody[0] = 0xa0u;
-    requestBody[1] = 0x05u;
-    requestBody[3] = 0x60u;
-    requestBody[24] = 0x05u;
-    requestBody[25] = 0x02u;
-    requestBody[27] = requestType;
-    requestBody[30] = 0xa1u;
-    requestBody[31] = 0xaau;
+std::vector<uint8_t> createRequestBody(int interface_type,
+                                       uint8_t requestType) {
+    if (interface_type == INTERFACE_TYPE_BINARY) {
+        return binary_interface::createRequestBody(requestType);
+    } else if (interface_type == INTERFACE_TYPE_WEB) {
+        return web_interface::createRequestBody();
+    }
 
-    return requestBody;
+    return {};
 }
 
-bool sendRequest(const Session *const session,
+bool sendRequest(Session *const session,
                  const std::vector<uint8_t> &data,
                  LogCallback log,
                  void *ctx) {
-    std::string requestType =
-        data[27] == RequestType::pollRequest ? "poll" : "creds";
-    int attempts = 5;
-    char errbuf[CURL_ERROR_SIZE];
-    curl_easy_setopt(session->curl, CURLOPT_ERRORBUFFER, errbuf);
+    if (data.empty()) {
+        log(ctx, PluginLogLevel::DEBUG, "While send request body is empty");
+        return false;
+    }
 
-    while (attempts--) {
-        log(ctx,
-            PluginLogLevel::DEBUG,
-            std::format("Attempt #{} to send {} request to {}:{}",
-                        5 - attempts,
-                        requestType,
-                        session->addr->ip,
-                        session->addr->port).c_str());
-
-        size_t sended_data = 0;
-        size_t requestSize = data.size();
-        memset(errbuf, 0, CURL_ERROR_SIZE);
-        CURLcode res = curl_easy_send(session->curl,
-                                      data.data(),
-                                      requestSize,
-                                      &sended_data);
-
-        if (res != CURLE_OK) {
-            log(ctx,
-                PluginLogLevel::ERROR,
-                std::format("Error code {} and message from curl "
-                            "while trying to send {} request to {}:{}: {}\n",
-                            static_cast<int>(res),
-                            requestType,
-                            session->addr->ip,
-                            session->addr->port,
-                            strlen(errbuf) ? errbuf : curl_easy_strerror(res))
-                .c_str());
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
-        }
-
-        if (sended_data != requestSize) {
-            size_t restDataSize = requestSize - sended_data;
-            memset(errbuf, 0, CURL_ERROR_SIZE);
-            const unsigned char *rest_data = data.data() + sended_data;
-            sended_data = 0;
-            res = curl_easy_send(session->curl,
-                                 rest_data,
-                                 restDataSize,
-                                 &sended_data);
-
-            if (res != CURLE_OK || sended_data != restDataSize) {
-                log(ctx,
-                    PluginLogLevel::ERROR,
-                    std::format("Error code {} and message from curl while "
-                                "trying to finish {} request to {}:{}: {}\n",
-                                static_cast<int>(res),
-                                requestType,
-                                session->addr->ip,
-                                session->addr->port,
-                                strlen(errbuf) ? errbuf : curl_easy_strerror(res))
-                    .c_str());
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                continue;
-            }
-        }
-        return true;
+    if (session->interface_type == INTERFACE_TYPE_BINARY) {
+        return binary_interface::sendRequest(session, data, log, ctx);
+    } else if (session->interface_type == INTERFACE_TYPE_WEB) {
+        return web_interface::sendRequest(session, data, log, ctx);
     }
 
     return false;
 }
 
 std::optional<std::vector<uint8_t>> receiveResponse(Session *const session) {
-    std::vector<uint8_t> response;
-    int attempts = 5;
-
-    while (attempts--) {
-#ifdef _WIN32
-        int poll_res = WSAPoll(session->poll_fds, 1, 30000);
-#else
-        int poll_res = poll(session->poll_fds, 1, 30000);
-#endif
-
-        if (poll_res == -1) {
-            return std::nullopt;
-        }
-
-        if (session->poll_fds[0].revents & POLLIN) {
-            uint8_t buffer[512];  // change it later
-            size_t read_data{0};
-
-            CURLcode res = curl_easy_recv(session->curl,
-                                          buffer,
-                                          sizeof(buffer),
-                                          &read_data);
-
-            if (res == CURLE_AGAIN) {
-                continue;
-            }
-
-            if (res != CURLE_OK || !read_data) {
-                break;
-            }
-
-            response.insert(response.end(), buffer, buffer + read_data);
-
-            if (response.size() >= 32) {
-                return response;
-            }
-        }
+    if (session->interface_type == INTERFACE_TYPE_BINARY) {
+        return binary_interface::receiveResponse(session);
+    } else if (session->interface_type == INTERFACE_TYPE_WEB) {
+        return web_interface::receiveResponse(session);
     }
 
     return std::nullopt;
 }
 
-bool isValidResponse(const std::vector<uint8_t> &response, RequestType type) {
-    if (response.size() < 32) {
-        return false;
-    }
-
-    if (type == RequestType::pollRequest) {
-        return response[0] == 0xb0 &&
-               response[8] == 0x01 &&
-               response[26] == 0xf9 &&
-               response[31] == 0x02;
-    }
-
-    if (type == RequestType::authRequest) {
-        return response[0] == 0xb0 &&
-               response[26] == 0xf9 &&
-               response[31] == 0x02;
+bool isValidResponse(const std::vector<uint8_t> &response,
+                     int interface_type,
+                     RequestType type) {
+    if (interface_type == INTERFACE_TYPE_BINARY) {
+        return binary_interface::isValidResponse(response, type);
+    } else if (interface_type == INTERFACE_TYPE_WEB) {
+        return web_interface::isValidResponse(response, type);
     }
 
     return false;
 }
 
-std::optional<std::pair<std::string_view, std::string_view>>
-parsePollResponse(std::string_view response) {
-    size_t start_pos = response.find(REALM_TAG);
-    if (start_pos == std::string::npos) {
-        return std::nullopt;
-    }
-    size_t end_pos = response.find(EOL_TAG, start_pos);
-    if (end_pos == std::string::npos ||
-        end_pos <= start_pos) {
-        return std::nullopt;
-    }
-
-    std::string_view realm{response.data() + start_pos + REALM_TAG.size(),
-                           response.data() + end_pos};
-
-    start_pos = response.find(RANDOM_TAG, end_pos + EOL_TAG.size());
-    if (start_pos == std::string::npos) {
-        return std::nullopt;
-    }
-    end_pos = response.find(EOL_TAG, start_pos);
-    if (end_pos == std::string::npos ||
-        end_pos <= start_pos) {
-        return std::nullopt;
+std::optional<std::variant<std::pair<std::string_view, std::string_view>,
+                           std::string_view>>
+parsePollResponse(int interface_type, const std::vector<uint8_t> &response) {
+    if (interface_type == INTERFACE_TYPE_BINARY) {
+        return binary_interface::parsePollResponse(std::string_view(
+            reinterpret_cast<const char *>(response.data() + 32),
+            response.size() - 32));
+    } else if (interface_type == INTERFACE_TYPE_WEB) {
+        return std::string_view(
+            reinterpret_cast<const char *>(response.data()), response.size());
     }
 
-    std::string_view random{response.data() + start_pos + RANDOM_TAG.size(),
-                            response.data() + end_pos};
+    return std::nullopt;
+}
 
-    return std::make_pair(realm, random);
+std::vector<uint8_t>
+createPayload(const std::variant<std::pair<std::string_view, std::string_view>,
+                                 std::string_view> &device_data,
+              std::string_view username,
+              std::string_view password) {
+    if (auto binary_data =
+            std::get_if<std::pair<std::string_view,
+                                  std::string_view>>(&device_data)) {
+        return binary_interface::createPayload(
+            binary_data->first, binary_data->second, username, password);
+    } else if (auto web_data =
+                   std::get_if<std::string_view>(&device_data)) {
+        return web_interface::createPayload(*web_data, username, password);
+    }
+
+    return {};
+}
+
+int validateResponse(const std::vector<uint8_t> &response) {
+    return web_interface::validateResponse(response);
 }
 

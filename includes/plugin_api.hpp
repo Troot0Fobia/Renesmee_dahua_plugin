@@ -31,6 +31,10 @@
 extern "C" {
 #endif
 
+#define INTERFACE_TYPE_UNKNOWN 0
+#define INTERFACE_TYPE_WEB 1
+#define INTERFACE_TYPE_BINARY 2
+
 enum PluginLogLevel { VERBOSE = 0, DEBUG, ERROR };
 using LogCallback = void (*)(void* ctx, PluginLogLevel level, const char* msg);
 using PrintProcessedCallback = void (*)(void* ctx,
@@ -41,6 +45,9 @@ using InitPlugin = int (PLUGIN_API_CALL *)();
 using ShutdownPlugin = void (PLUGIN_API_CALL *)();
 using CreateSession =
     const void *const (PLUGIN_API_CALL *)(const __Proxy *proxy);
+using ChangeSessionState = void (PLUGIN_API_CALL *)(const void *const session_p,
+                                                    const char *state_name,
+                                                    int value);
 using CloseSession = void (PLUGIN_API_CALL *) (const void *const session_p);
 using GetPluginVersion = const char* (PLUGIN_API_CALL *)() noexcept;
 using ValidateAddr = int (PLUGIN_API_CALL *)(const void *const session_p,
@@ -56,6 +63,7 @@ using CheckCreds = int (PLUGIN_API_CALL *)(const void *const session,
 struct PLUGIN_API_EXPORT PluginAPI {
     InitPlugin initPlugin;
     CreateSession createSession;
+    ChangeSessionState changeSessionState;
     GetPluginVersion getVersion;
     ValidateAddr validateAddr;
     CheckCreds checkCreds;
